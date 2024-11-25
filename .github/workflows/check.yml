@@ -1,0 +1,25 @@
+name: zig-csv automatic checks
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+      - name: Run tests
+        run: zig build test --summary all
+      - name: Check formatting
+        run: zig fmt --check csv.zig
