@@ -47,7 +47,7 @@ pub fn main() !void {
     while (try reader.next(&record)) {
         try stdout_writer.print("Record at line {d} with {d} fields:\n", .{ record.line_no, record.len() });
         for (0..record.len()) |i| {
-            try stdout_writer.print("\t{d}: {s}\n, .{ i, record.get(i) });
+            try stdout_writer.print("\t{d}: {s}\n", .{ i, record.get(i) });
         }
     }
 
