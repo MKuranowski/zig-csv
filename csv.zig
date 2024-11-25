@@ -294,7 +294,7 @@ pub fn Writer(comptime IoWriter: type) type {
 
         /// writeRecord writes a CSV record to the underlying writer.
         ///
-        /// _record_ can be either a slice, pointer-to-many or a tuple of []const u8
+        /// `record` can be either a slice, pointer-to-many or a tuple of []const u8
         /// (or anything which can automatically be coerced to []const u8).
         ///
         /// It's forbidden to mix `writeRecord` and `writeField` calls to write a single record.
@@ -403,7 +403,6 @@ pub const Record = struct {
 
     /// Number of complete fields in `field_buffers`.
     /// `field_buffers[0..complete_fields]` represents completely parsed fields.
-    /// `field_buffers[complete_fields]`, if present, contains a field being built.
     complete_fields: usize = 0,
 
     pub inline fn init(allocator: Allocator) Record {
