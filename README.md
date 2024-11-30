@@ -1,7 +1,9 @@
 zig-csv
 =======
 
-Library for CSV (as per [RFC 4180](https://www.rfc-editor.org/rfc/rfc4180)) reading and writing in Zig
+[GitHub](https://github.com/mkuranowski/zig-csv) | [Documentation](https://mkuranowski.github.io/zig-csv/)
+
+Library for CSV (as per [RFC 4180](https://www.rfc-editor.org/rfc/rfc4180)) reading and writing in Zig.
 
 
 Installation
@@ -23,8 +25,13 @@ These instructions assume a standard build.zig-based project.
     const csv = @import("csv");
     ```
 
+
 Usage
 -----
+
+Note that due to <https://github.com/ziglang/zig/issues/12484> the below examples
+use the [c_allocator](https://ziglang.org/documentation/0.13.0/std/#std.heap.c_allocator)
+and therefore require linking against libc.
 
 ### Basic reading
 
@@ -87,7 +94,16 @@ pub fn main() !void {
 ### Advanced
 
 This library supports custom dialects, and is suitable for pipe-delimited or tab-delimited
-files as well. See the documentation for details.
+files as well. See [the documentation](https://mkuranowski.github.io/zig-csv/) for details.
+
+
+Documentation
+-------------
+
+Automatically built documentation is available under <https://mkuranowski.github.io/zig-csv/>.
+Due to GitHub pages limitation, this documentation is for the latest release of the library.
+To obtain docs of an older version, clone the repository, checkout to the desired commit/tag,
+and run `zig build docs`.
 
 License
 -------

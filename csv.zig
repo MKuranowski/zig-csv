@@ -1,6 +1,10 @@
 // © Copyright 2024 Mikołaj Kuranowski
 // SPDX-License-Identifier: MIT
 
+//! Library for CSV (as per [RFC 4180](https://www.rfc-editor.org/rfc/rfc4180)) reading and writing.
+//!
+//! Links: [GitHub](https://github.com/mkuranowski/zig-csv) | [Documentation](https://mkuranowski.github.io/zig-csv/)
+
 const std = @import("std");
 const assert = std.debug.assert;
 const io = std.io;
