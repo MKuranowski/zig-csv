@@ -1,0 +1,25 @@
+name: zig-csv automatic documentation
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  build-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+      - name: Build documentation
+        run: zig build docs
+      - name: Deploy documentation
+        uses: Cecilapp/GitHub-Pages-deploy@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          email: mkuranowski@gmail.com
+          build_dir: ./zig-out/docs
