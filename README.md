@@ -16,9 +16,9 @@ These instructions assume a standard build.zig-based project.
     ```zig
     const csv_module = b.dependency("csv", .{ .target = target, .optimize = optimize }).module("csv");
     ```
-3. Add import to all Compile steps which import the library:
+3. Add import to all of your modules which import the library:
     ```zig
-    compile_step_like_exe.root_module.addImport("csv", csv_module);
+    your_module.addImport("csv", csv_module);
     ```
 4. Use the library in your code with:
     ```zig
@@ -40,25 +40,28 @@ const std = @import("std");
 const csv = @import("csv");
 
 pub fn main() !void {
-    var stdout_buffer = std.io.bufferedWriter(std.io.getStdOut().writer());
-    const stdout_writer = stdout_buffer.writer();
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
 
-    const file = try std.fs.cwd().openFileZ("file.csv", .{});
-    defer file.close();
-    var file_buffer = std.io.bufferedReader(file.reader());
+    var file_buffer: [4096]u8 = undefined;
+    const file_handle = try std.fs.cwd().openFileZ("file.csv", .{});
+    defer file_handle.close();
+    var file_reader = file_handle.reader(&file_buffer);
+    const file = &file_reader.interface;
 
-    var reader = csv.reader(file_buffer.reader(), .{});
+    var reader = csv.Reader.init(file, .{});
     var record = csv.Record.init(std.heap.c_allocator);
     defer record.deinit();
 
     while (try reader.next(&record)) {
-        try stdout_writer.print("Record at line {d} with {d} fields:\n", .{ record.line_no, record.len() });
+        try stdout.print("Record at line {d} with {d} fields:\n", .{ record.line_no, record.len() });
         for (0..record.len()) |i| {
-            try stdout_writer.print("\t{d}: {s}\n", .{ i, record.get(i) });
+            try stdout.print("\t{d}: {s}\n", .{ i, record.get(i) });
         }
     }
 
-    try stdout_buffer.flush();
+    try stdout.flush();
 }
 ```
 
@@ -69,11 +72,13 @@ const std = @import("std");
 const csv = @import("csv");
 
 pub fn main() !void {
-    const file = try std.fs.cwd().createFileZ("file.csv", .{});
-    defer file.close();
-    var buffer = std.io.bufferedReader(file.reader());
+    var file_buffer: [4096]u8 = undefined;
+    const file_handle = try std.fs.cwd().createFileZ("file.csv", .{});
+    defer file_handle.close();
+    var file_writer = file_handle.writer(&file_buffer);
+    const file = &file_writer.interface;
 
-    var writer = csv.writer(buffer.writer(), .{});
+    var writer = csv.Writer.init(file, .{});
 
     // Write a record from a tuple
     try writer.writeRecord(.{ "constant", "value" });
@@ -87,7 +92,7 @@ pub fn main() !void {
     try writer.writeField("2.7183");
     try writer.terminateRecord();
 
-    try buffer.flush();
+    try file.flush();
 }
 ```
 
