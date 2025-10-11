@@ -1,6 +1,6 @@
 .{
     .name = .csv,
-    .version = "1.0.0",
+    .version = "2.0.0",
     .minimum_zig_version = "0.15.1",
     .paths = .{ "build.zig", "build.zig.zon", "csv.zig", "LICENSE", "README.md" },
     .fingerprint = 0x8a45257dcddf16f,
