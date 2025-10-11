@@ -18,7 +18,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v1
         with:
-          version: 0.13.0
+          version: 0.15.1
       - name: Run tests
         run: zig build test --summary all
       - name: Check formatting
