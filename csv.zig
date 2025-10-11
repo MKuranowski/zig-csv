@@ -309,7 +309,7 @@ pub fn Writer(comptime IoWriter: type) type {
 
             switch (@typeInfo(@TypeOf(record))) {
                 // Slice of fields
-                .Pointer => |ptr| {
+                .pointer => |ptr| {
                     if (ptr.size == .Slice or ptr.size == .Many) {
                         for (record) |field| try self.writeField(field);
                         try self.terminateRecord();
@@ -318,7 +318,7 @@ pub fn Writer(comptime IoWriter: type) type {
                 },
 
                 // Tuple of fields
-                .Struct => |str| {
+                .@"struct" => |str| {
                     if (str.is_tuple) {
                         inline for (record) |field| try self.writeField(field);
                         try self.terminateRecord();
@@ -607,10 +607,10 @@ test "csv.reading.bom_false" {
 }
 
 test "csv.writing.basic" {
-    var data = std.ArrayList(u8).init(std.testing.allocator);
-    defer data.deinit();
+    var data: std.ArrayList(u8) = .{};
+    defer data.deinit(std.testing.allocator);
 
-    var w = writer(data.writer(), .{});
+    var w = writer(data.writer(std.testing.allocator), .{});
     try w.writeRecord(.{ "foo", "bar", "baz" });
 
     try w.writeField("this field needs to be \"escaped\"");
@@ -625,10 +625,10 @@ test "csv.writing.basic" {
 }
 
 test "csv.writing.bom" {
-    var data = std.ArrayList(u8).init(std.testing.allocator);
-    defer data.deinit();
+    var data: std.ArrayList(u8) = .{};
+    defer data.deinit(std.testing.allocator);
 
-    var w = writer(data.writer(), .{ .bom = true });
+    var w = writer(data.writer(std.testing.allocator), .{ .bom = true });
     try w.writeRecord(.{ "foo", "bar", "baz" });
     try w.writeRecord(.{ "spam", "eggs", "42" });
 
@@ -639,11 +639,11 @@ test "csv.writing.bom" {
 }
 
 test "csv.writing_with_custom_dialect" {
-    var data = std.ArrayList(u8).init(std.testing.allocator);
-    defer data.deinit();
+    var data: std.ArrayList(u8) = .{};
+    defer data.deinit(std.testing.allocator);
 
     var w = writer(
-        data.writer(),
+        data.writer(std.testing.allocator),
         .{
             .delimiter = '|',
             .quote = '\'',
