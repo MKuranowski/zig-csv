@@ -6,11 +6,7 @@
 //! Links: [GitHub](https://github.com/mkuranowski/zig-csv) | [Documentation](https://mkuranowski.github.io/zig-csv/)
 
 const std = @import("std");
-const assert = std.debug.assert;
 const io = std.io;
-const mem = std.mem;
-const Allocator = std.mem.Allocator;
-const ArrayListUnmanaged = std.ArrayListUnmanaged;
 
 /// Terminator represents a record delimiter - either a specific octet, or the CR LF sequence.
 pub const Terminator = union(enum) {
@@ -305,7 +301,7 @@ pub fn Writer(comptime IoWriter: type) type {
         /// If mixing both functions, a `writeRecord` can't follow a call to `writeField` -
         /// `terminateRecord` must be called first.
         pub fn writeRecord(self: *Self, record: anytype) !void {
-            assert(!self.needs_comma); // writeRecord called without terminating previous row.
+            std.debug.assert(!self.needs_comma); // writeRecord called without terminating previous row.
 
             switch (@typeInfo(@TypeOf(record))) {
                 // Slice of fields
@@ -368,7 +364,7 @@ pub fn Writer(comptime IoWriter: type) type {
         }
 
         fn needsEscaping(self: Self, field: []const u8) bool {
-            return mem.indexOfAny(u8, field, &self.bytes_to_escape) != null;
+            return std.mem.indexOfAny(u8, field, &self.bytes_to_escape) != null;
         }
     };
 }
@@ -392,7 +388,7 @@ pub fn writer(io_writer: anytype, dialect: Dialect) Writer(@TypeOf(io_writer)) {
 /// }
 /// ```
 pub const Record = struct {
-    allocator: Allocator,
+    allocator: std.mem.Allocator,
 
     /// Line number of the record in the source file. If records spans multiple lines,
     /// it's the first line of the record.
@@ -403,13 +399,13 @@ pub const Record = struct {
 
     /// Array of buffers for fields. Length has to be >= self.complete_fields.
     /// Extra elements preserve allocated buffers for next fields, to avoid reallocations.
-    field_buffers: ArrayListUnmanaged(ArrayListUnmanaged(u8)) = .{},
+    field_buffers: std.ArrayList(std.ArrayList(u8)) = .{},
 
     /// Number of complete fields in `field_buffers`.
     /// `field_buffers[0..complete_fields]` represents completely parsed fields.
     complete_fields: usize = 0,
 
-    pub inline fn init(allocator: Allocator) Record {
+    pub inline fn init(allocator: std.mem.Allocator) Record {
         return .{ .allocator = allocator };
     }
 
@@ -422,25 +418,25 @@ pub const Record = struct {
 
     /// line returns the number of complete fields in this record
     pub inline fn len(self: Record) usize {
-        assert(self.field_buffers.items.len >= self.complete_fields); // invariant for complete fields
+        std.debug.assert(self.field_buffers.items.len >= self.complete_fields); // invariant for complete fields
         return self.complete_fields;
     }
 
     /// get returns the ith complete field, asserting that it's a complete field.
     pub inline fn get(self: Record, i: usize) []u8 {
-        assert(i < self.complete_fields); // check if complete field is accessed
-        assert(self.field_buffers.items.len >= self.complete_fields); // invariant for complete fields
+        std.debug.assert(i < self.complete_fields); // check if complete field is accessed
+        std.debug.assert(self.field_buffers.items.len >= self.complete_fields); // invariant for complete fields
         return self.field_buffers.items[i].items;
     }
 
     /// get returns the ith complete field, or null if no valid field exists at the provided index.
     pub inline fn getSafe(self: Record, i: usize) ?[]u8 {
-        assert(self.field_buffers.items.len >= self.complete_fields); // invariant for complete fields
+        std.debug.assert(self.field_buffers.items.len >= self.complete_fields); // invariant for complete fields
         return if (i < self.complete_fields) self.field_buffers.items[i].items else null;
     }
 
     /// slice returns a slice over arrays holding the complete fields.
-    pub inline fn slice(self: Record) []ArrayListUnmanaged(u8) {
+    pub inline fn slice(self: Record) []std.ArrayList(u8) {
         return self.field_buffers.items[0..self.complete_fields];
     }
 
@@ -474,7 +470,7 @@ pub const Record = struct {
 
     /// Ensures the field-being-build (field_buffers[complete_fields]) exists.
     fn ensureIncompleteField(self: *Record) !void {
-        assert(self.field_buffers.items.len >= self.complete_fields); // invariant for complete fields
+        std.debug.assert(self.field_buffers.items.len >= self.complete_fields); // invariant for complete fields
 
         if (self.field_buffers.items.len == self.complete_fields) {
             try self.field_buffers.append(self.allocator, .{});
