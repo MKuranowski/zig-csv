@@ -6,7 +6,6 @@
 //! Links: [GitHub](https://github.com/mkuranowski/zig-csv) | [Documentation](https://mkuranowski.github.io/zig-csv/)
 
 const std = @import("std");
-const io = std.io;
 
 /// Terminator represents a record delimiter - either a specific octet, or the CR LF sequence.
 pub const Terminator = union(enum) {
@@ -78,173 +77,160 @@ const State = enum {
 /// 4. Initial 0xEF 0xBB 0xBF (UTF-8 encoding of U+FEFF, the "byte order mark") may be consumed,
 ///    depending on the value of `Dialect.bom`.
 /// 5. The values for COMMA, DQUOTE or CRLF rules can be customized; see `Dialect` for details.
-///
-/// `IoReader` can by any type with a `fn readByte(self) Error || error{EndOfStream} ! u8`
-/// method. However, it is highly recommended to use a io.BufferedReader.
-pub fn Reader(comptime IoReader: type) type {
-    return struct {
-        const Self = @This();
+pub const Reader = struct {
+    r: *std.Io.Reader,
+    d: Dialect,
 
-        r: IoReader,
-        d: Dialect,
+    state: State,
+    line_no: u32 = 1,
+    line_no_seen_cr: bool = false,
 
-        state: State,
-        line_no: u32 = 1,
-        line_no_seen_cr: bool = false,
+    pub inline fn init(io_reader: *std.Io.Reader, dialect: Dialect) Reader {
+        return .{
+            .r = io_reader,
+            .d = dialect,
+            .state = if (dialect.bom == false) .before_record else .eat_bom_1,
+        };
+    }
 
-        pub inline fn init(io_reader: IoReader, dialect: Dialect) Self {
-            return Self{
-                .r = io_reader,
-                .d = dialect,
-                .state = if (dialect.bom == false) .before_record else .eat_bom_1,
+    pub fn next(self: *Reader, record: *Record) !bool {
+        record.line_no = self.line_no;
+        record.clear();
+
+        while (true) {
+            const b = self.getByte() catch |err| {
+                if (err == error.EndOfStream) {
+                    switch (self.state) {
+                        .before_record, .eat_lf => {
+                            return false;
+                        },
+
+                        else => {
+                            self.state = .before_record;
+                            try record.pushField();
+                            return true;
+                        },
+                    }
+                } else {
+                    return err;
+                }
             };
-        }
 
-        pub fn next(self: *Self, record: *Record) !bool {
-            record.line_no = self.line_no;
-            record.clear();
-
-            while (true) {
-                const b = self.getByte() catch |err| {
-                    if (err == error.EndOfStream) {
-                        switch (self.state) {
-                            .before_record, .eat_lf => {
-                                return false;
-                            },
-
-                            else => {
-                                self.state = .before_record;
-                                try record.pushField();
-                                return true;
-                            },
-                        }
-                    } else {
-                        return err;
-                    }
-                };
-
-                if (self.state == .eat_bom_1) {
-                    if (b == 0xEF) {
-                        self.state = .eat_bom_2;
-                        continue;
-                    } else {
-                        self.state = .before_record;
-                        // fallthrough
-                    }
-                }
-
-                if (self.state == .eat_bom_2) {
-                    if (b == 0xBB) {
-                        self.state = .eat_bom_3;
-                    } else {
-                        try record.pushByte(0xEF);
-                        self.state = .in_field;
-                    }
+            if (self.state == .eat_bom_1) {
+                if (b == 0xEF) {
+                    self.state = .eat_bom_2;
                     continue;
+                } else {
+                    self.state = .before_record;
+                    // fallthrough
                 }
+            }
 
-                if (self.state == .eat_bom_3) {
-                    if (b == 0xBF) {
-                        self.state = .before_record;
-                    } else {
-                        try record.pushBytes("\xEF\xBB");
-                        self.state = .in_field;
-                    }
+            if (self.state == .eat_bom_2) {
+                if (b == 0xBB) {
+                    self.state = .eat_bom_3;
+                } else {
+                    try record.pushByte(0xEF);
+                    self.state = .in_field;
+                }
+                continue;
+            }
+
+            if (self.state == .eat_bom_3) {
+                if (b == 0xBF) {
+                    self.state = .before_record;
+                } else {
+                    try record.pushBytes("\xEF\xBB");
+                    self.state = .in_field;
+                }
+                continue;
+            }
+
+            if (self.state == .eat_lf) {
+                if (b == '\n') {
                     continue;
+                } else {
+                    self.state = .before_record;
+                    // fallthrough
                 }
+            }
 
-                if (self.state == .eat_lf) {
-                    if (b == '\n') {
-                        continue;
-                    } else {
-                        self.state = .before_record;
-                        // fallthrough
-                    }
+            if (self.state == .before_field or self.state == .before_record) {
+                if (b == self.d.quote) {
+                    self.state = .in_quoted_field;
+                    continue;
+                } else {
+                    self.state = .in_field;
+                    // fallthrough
                 }
+            }
 
-                if (self.state == .before_field or self.state == .before_record) {
-                    if (b == self.d.quote) {
-                        self.state = .in_quoted_field;
-                        continue;
-                    } else {
-                        self.state = .in_field;
-                        // fallthrough
-                    }
-                }
-
-                if (self.state == .quote_in_quoted) {
-                    if (b == self.d.quote) {
-                        try record.pushByte(b);
-                        self.state = .in_quoted_field;
-                        continue;
-                    } else {
-                        self.state = .in_field;
-                        // fallthrough
-                    }
-                }
-
-                if (self.state == .in_field) {
-                    // Try to match with delimiter
-                    if (b == self.d.delimiter) {
-                        try record.pushField();
-                        self.state = .before_field;
-                        continue;
-                    }
-
-                    // Try to match with terminator
-                    switch (self.d.terminator) {
-                        .octet => |terminator| {
-                            if (b == terminator) {
-                                self.state = .before_record;
-                                try record.pushField();
-                                return true;
-                            }
-                        },
-
-                        .crlf => {
-                            if (b == '\r' or b == '\n') {
-                                self.state = if (b == '\r') .eat_lf else .before_record;
-                                try record.pushField();
-                                return true;
-                            }
-                        },
-                    }
-
+            if (self.state == .quote_in_quoted) {
+                if (b == self.d.quote) {
                     try record.pushByte(b);
+                    self.state = .in_quoted_field;
+                    continue;
+                } else {
+                    self.state = .in_field;
+                    // fallthrough
+                }
+            }
+
+            if (self.state == .in_field) {
+                // Try to match with delimiter
+                if (b == self.d.delimiter) {
+                    try record.pushField();
+                    self.state = .before_field;
                     continue;
                 }
 
-                if (self.state == .in_quoted_field) {
-                    if (b == self.d.quote) {
-                        self.state = .quote_in_quoted;
-                    } else {
-                        try record.pushByte(b);
-                    }
-                    continue;
+                // Try to match with terminator
+                switch (self.d.terminator) {
+                    .octet => |terminator| {
+                        if (b == terminator) {
+                            self.state = .before_record;
+                            try record.pushField();
+                            return true;
+                        }
+                    },
+
+                    .crlf => {
+                        if (b == '\r' or b == '\n') {
+                            self.state = if (b == '\r') .eat_lf else .before_record;
+                            try record.pushField();
+                            return true;
+                        }
+                    },
                 }
+
+                try record.pushByte(b);
+                continue;
+            }
+
+            if (self.state == .in_quoted_field) {
+                if (b == self.d.quote) {
+                    self.state = .quote_in_quoted;
+                } else {
+                    try record.pushByte(b);
+                }
+                continue;
             }
         }
+    }
 
-        fn getByte(self: *Self) !u8 {
-            const b = try self.r.readByte();
-            if (b == '\r') {
-                self.line_no += 1;
-                self.line_no_seen_cr = true;
-            } else if (b == '\n' and !self.line_no_seen_cr) {
-                self.line_no += 1;
-            } else {
-                self.line_no_seen_cr = false;
-            }
-            return b;
+    fn getByte(self: *Reader) !u8 {
+        const b = try self.r.takeByte();
+        if (b == '\r') {
+            self.line_no += 1;
+            self.line_no_seen_cr = true;
+        } else if (b == '\n' and !self.line_no_seen_cr) {
+            self.line_no += 1;
+        } else {
+            self.line_no_seen_cr = false;
         }
-    };
-}
-
-/// reader returns an initialized `Reader` over a given io.Reader instance.
-/// See `Reader` documentation for details.
-pub fn reader(io_reader: anytype, dialect: Dialect) Reader(@TypeOf(io_reader)) {
-    return Reader(@TypeOf(io_reader)).init(io_reader, dialect);
-}
+        return b;
+    }
+};
 
 /// Writers writes [RFC 4180](https://www.rfc-editor.org/rfc/rfc4180#section-2) CSV files.
 ///
@@ -255,125 +241,115 @@ pub fn reader(io_reader: anytype, dialect: Dialect) Reader(@TypeOf(io_reader)) {
 /// `IoWriter` can be any type with `fn writeAll(self, []const u8) !void` and
 /// `fn writeByte(self, u8) !void` methods. However, it is highly recommended to use
 /// io.BufferedWriter.
-pub fn Writer(comptime IoWriter: type) type {
-    return struct {
-        const Self = @This();
+pub const Writer = struct {
+    w: *std.Io.Writer,
+    d: Dialect,
+    needs_bom: bool = false,
+    needs_comma: bool = false,
+    bytes_to_escape: [4]u8,
 
-        w: IoWriter,
-        d: Dialect,
-        needs_bom: bool = false,
-        needs_comma: bool = false,
-        bytes_to_escape: [4]u8,
+    pub inline fn init(io_writer: *std.Io.Writer, dialect: Dialect) Writer {
+        return .{
+            .w = io_writer,
+            .d = dialect,
+            .needs_bom = dialect.bom orelse false,
+            .bytes_to_escape = getBytesToEscape(dialect),
+        };
+    }
 
-        pub inline fn init(io_writer: IoWriter, dialect: Dialect) Self {
-            return Self{
-                .w = io_writer,
-                .d = dialect,
-                .needs_bom = dialect.bom orelse false,
-                .bytes_to_escape = getBytesToEscape(dialect),
-            };
+    fn getBytesToEscape(dialect: Dialect) [4]u8 {
+        var to_escape: [4]u8 = undefined;
+        to_escape[0] = dialect.delimiter;
+        to_escape[1] = dialect.quote orelse '"';
+        switch (dialect.terminator) {
+            .octet => |terminator| {
+                to_escape[2] = terminator;
+                to_escape[3] = terminator;
+            },
+
+            .crlf => {
+                to_escape[2] = '\r';
+                to_escape[3] = '\n';
+            },
         }
+        return to_escape;
+    }
 
-        fn getBytesToEscape(dialect: Dialect) [4]u8 {
-            var to_escape: [4]u8 = undefined;
-            to_escape[0] = dialect.delimiter;
-            to_escape[1] = dialect.quote orelse '"';
-            switch (dialect.terminator) {
-                .octet => |terminator| {
-                    to_escape[2] = terminator;
-                    to_escape[3] = terminator;
-                },
+    /// writeRecord writes a CSV record to the underlying writer.
+    ///
+    /// `record` can be either a slice, pointer-to-many or a tuple of []const u8
+    /// (or anything which can automatically be coerced to []const u8).
+    ///
+    /// It's forbidden to mix `writeRecord` and `writeField` calls to write a single record.
+    /// If mixing both functions, a `writeRecord` can't follow a call to `writeField` -
+    /// `terminateRecord` must be called first.
+    pub fn writeRecord(self: *Writer, record: anytype) !void {
+        std.debug.assert(!self.needs_comma); // writeRecord called without terminating previous row.
 
-                .crlf => {
-                    to_escape[2] = '\r';
-                    to_escape[3] = '\n';
-                },
-            }
-            return to_escape;
-        }
-
-        /// writeRecord writes a CSV record to the underlying writer.
-        ///
-        /// `record` can be either a slice, pointer-to-many or a tuple of []const u8
-        /// (or anything which can automatically be coerced to []const u8).
-        ///
-        /// It's forbidden to mix `writeRecord` and `writeField` calls to write a single record.
-        /// If mixing both functions, a `writeRecord` can't follow a call to `writeField` -
-        /// `terminateRecord` must be called first.
-        pub fn writeRecord(self: *Self, record: anytype) !void {
-            std.debug.assert(!self.needs_comma); // writeRecord called without terminating previous row.
-
-            switch (@typeInfo(@TypeOf(record))) {
-                // Slice of fields
-                .pointer => |ptr| {
-                    if (ptr.size == .Slice or ptr.size == .Many) {
-                        for (record) |field| try self.writeField(field);
-                        try self.terminateRecord();
-                        return;
-                    }
-                },
-
-                // Tuple of fields
-                .@"struct" => |str| {
-                    if (str.is_tuple) {
-                        inline for (record) |field| try self.writeField(field);
-                        try self.terminateRecord();
-                        return;
-                    }
-                },
-
-                else => {},
-            }
-
-            @compileError(@typeName(@TypeOf(record)) ++ " can't be interpreted as a CSV record");
-        }
-
-        /// writeField writes a CSV field to the underlying writer.
-        ///
-        /// The caller must also call `terminateRecord` once all fields
-        /// of the record have been written.
-        pub fn writeField(self: *Self, field: []const u8) !void {
-            if (self.needs_bom) {
-                try self.w.writeAll("\xEF\xBB\xBF");
-                self.needs_bom = false;
-            }
-
-            if (self.needs_comma) try self.w.writeByte(self.d.delimiter);
-            self.needs_comma = true;
-
-            if (self.needsEscaping(field)) {
-                const quote = self.d.quote orelse '"';
-                try self.w.writeByte(quote);
-                for (field) |octet| {
-                    if (octet == quote) try self.w.writeByte(octet);
-                    try self.w.writeByte(octet);
+        switch (@typeInfo(@TypeOf(record))) {
+            // Slice of fields
+            .pointer => |ptr| {
+                if (ptr.size == .Slice or ptr.size == .Many) {
+                    for (record) |field| try self.writeField(field);
+                    try self.terminateRecord();
+                    return;
                 }
-                try self.w.writeByte(quote);
-            } else {
-                try self.w.writeAll(field);
+            },
+
+            // Tuple of fields
+            .@"struct" => |str| {
+                if (str.is_tuple) {
+                    inline for (record) |field| try self.writeField(field);
+                    try self.terminateRecord();
+                    return;
+                }
+            },
+
+            else => {},
+        }
+
+        @compileError(@typeName(@TypeOf(record)) ++ " can't be interpreted as a CSV record");
+    }
+
+    /// writeField writes a CSV field to the underlying writer.
+    ///
+    /// The caller must also call `terminateRecord` once all fields
+    /// of the record have been written.
+    pub fn writeField(self: *Writer, field: []const u8) !void {
+        if (self.needs_bom) {
+            try self.w.writeAll("\xEF\xBB\xBF");
+            self.needs_bom = false;
+        }
+
+        if (self.needs_comma) try self.w.writeByte(self.d.delimiter);
+        self.needs_comma = true;
+
+        if (self.needsEscaping(field)) {
+            const quote = self.d.quote orelse '"';
+            try self.w.writeByte(quote);
+            for (field) |octet| {
+                if (octet == quote) try self.w.writeByte(octet);
+                try self.w.writeByte(octet);
             }
+            try self.w.writeByte(quote);
+        } else {
+            try self.w.writeAll(field);
         }
+    }
 
-        /// terminateRecord writes the record terminator to the underlying writer.
-        pub fn terminateRecord(self: *Self) !void {
-            self.needs_comma = false;
-            switch (self.d.terminator) {
-                .octet => |terminator| try self.w.writeByte(terminator),
-                .crlf => try self.w.writeAll("\r\n"),
-            }
+    /// terminateRecord writes the record terminator to the underlying writer.
+    pub fn terminateRecord(self: *Writer) !void {
+        self.needs_comma = false;
+        switch (self.d.terminator) {
+            .octet => |terminator| try self.w.writeByte(terminator),
+            .crlf => try self.w.writeAll("\r\n"),
         }
+    }
 
-        fn needsEscaping(self: Self, field: []const u8) bool {
-            return std.mem.indexOfAny(u8, field, &self.bytes_to_escape) != null;
-        }
-    };
-}
-
-/// writer returns an initialized `Writer` over a given io.Writer instance.
-/// See `Writer` documentation for details.
-pub fn writer(io_writer: anytype, dialect: Dialect) Writer(@TypeOf(io_writer)) {
-    return Writer(@TypeOf(io_writer)).init(io_writer, dialect);
-}
+    fn needsEscaping(self: Writer, field: []const u8) bool {
+        return std.mem.indexOfAny(u8, field, &self.bytes_to_escape) != null;
+    }
+};
 
 /// Record represents a single record from a CSV file.
 ///
@@ -480,8 +456,8 @@ pub const Record = struct {
 
 test "csv.reading.basic" {
     const data = "pi,3.1416\r\nsqrt2,1.4142\r\nphi,1.618\r\ne,2.7183\r\n";
-    var stream = io.fixedBufferStream(data);
-    var r = reader(stream.reader(), .{});
+    var fixed_reader = std.Io.Reader.fixed(data);
+    var r = Reader.init(&fixed_reader, .{});
 
     var record = Record.init(std.testing.allocator);
     defer record.deinit();
@@ -520,9 +496,8 @@ test "csv.reading.with_quoted_fields" {
         \\"it's another
         \\record",with a newline inside,"but no ""trailing"" "one!
     ;
-
-    var stream = io.fixedBufferStream(data);
-    var r = reader(stream.reader(), .{});
+    var fixed_reader = std.Io.Reader.fixed(data);
+    var r = Reader.init(&fixed_reader, .{});
 
     var record = Record.init(std.testing.allocator);
     defer record.deinit();
@@ -546,9 +521,9 @@ test "csv.reading.with_quoted_fields" {
 
 test "csv.reading.with_custom_dialect" {
     const data = "foo|bar#\"no quote handling|\"so this is another field#";
-    var stream = io.fixedBufferStream(data);
-    var r = reader(
-        stream.reader(),
+    var fixed_reader = std.Io.Reader.fixed(data);
+    var r = Reader.init(
+        &fixed_reader,
         .{
             .delimiter = '|',
             .quote = null,
@@ -574,8 +549,8 @@ test "csv.reading.with_custom_dialect" {
 
 test "csv.reading.bom_true" {
     const data = "\xEF\xBB\xBFname,value";
-    var stream = io.fixedBufferStream(data);
-    var r = reader(stream.reader(), .{ .bom = true });
+    var fixed_reader = std.Io.Reader.fixed(data);
+    var r = Reader.init(&fixed_reader, .{ .bom = true });
 
     var record = Record.init(std.testing.allocator);
     defer record.deinit();
@@ -589,8 +564,8 @@ test "csv.reading.bom_true" {
 
 test "csv.reading.bom_false" {
     const data = "\xEF\xBB\xBFname,value";
-    var stream = io.fixedBufferStream(data);
-    var r = reader(stream.reader(), .{ .bom = false });
+    var fixed_reader = std.Io.Reader.fixed(data);
+    var r = Reader.init(&fixed_reader, .{ .bom = false });
 
     var record = Record.init(std.testing.allocator);
     defer record.deinit();
@@ -603,10 +578,10 @@ test "csv.reading.bom_false" {
 }
 
 test "csv.writing.basic" {
-    var data: std.ArrayList(u8) = .{};
-    defer data.deinit(std.testing.allocator);
+    var buffer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer buffer.deinit();
 
-    var w = writer(data.writer(std.testing.allocator), .{});
+    var w = Writer.init(&buffer.writer, .{});
     try w.writeRecord(.{ "foo", "bar", "baz" });
 
     try w.writeField("this field needs to be \"escaped\"");
@@ -616,30 +591,30 @@ test "csv.writing.basic" {
 
     try std.testing.expectEqualStrings(
         "foo,bar,baz\r\n\"this field needs to be \"\"escaped\"\"\",\"and, this one\ntoo?\",but this one - 'no'\r\n",
-        data.items,
+        buffer.written(),
     );
 }
 
 test "csv.writing.bom" {
-    var data: std.ArrayList(u8) = .{};
-    defer data.deinit(std.testing.allocator);
+    var buffer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer buffer.deinit();
 
-    var w = writer(data.writer(std.testing.allocator), .{ .bom = true });
+    var w = Writer.init(&buffer.writer, .{ .bom = true });
     try w.writeRecord(.{ "foo", "bar", "baz" });
     try w.writeRecord(.{ "spam", "eggs", "42" });
 
     try std.testing.expectEqualStrings(
-        "\xEF\xBb\xBFfoo,bar,baz\r\nspam,eggs,42\r\n",
-        data.items,
+        "\xEF\xBB\xBFfoo,bar,baz\r\nspam,eggs,42\r\n",
+        buffer.written(),
     );
 }
 
 test "csv.writing_with_custom_dialect" {
-    var data: std.ArrayList(u8) = .{};
-    defer data.deinit(std.testing.allocator);
+    var buffer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer buffer.deinit();
 
-    var w = writer(
-        data.writer(std.testing.allocator),
+    var w = Writer.init(
+        &buffer.writer,
         .{
             .delimiter = '|',
             .quote = '\'',
@@ -651,6 +626,6 @@ test "csv.writing_with_custom_dialect" {
 
     try std.testing.expectEqualStrings(
         "foo|bar|baz#'needs|escaping'|'and''this#too'|\"but this\" - no#",
-        data.items,
+        buffer.written(),
     );
 }
