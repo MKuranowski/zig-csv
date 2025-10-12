@@ -27,4 +27,26 @@ pub fn build(b: *std.Build) void {
     });
     const docs_step = b.step("docs", "Generate library docs");
     docs_step.dependOn(&lib_docs.step);
+
+    const bench_module = b.addModule("bench", .{
+        .root_source_file = b.path("bench/main.zig"),
+        .single_threaded = true,
+        .strip = false,
+        .omit_frame_pointer = false,
+        .link_libc = true,
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_module.addImport("csv", module);
+    const bench_exe = b.addExecutable(.{
+        .name = "bench",
+        .root_module = bench_module,
+    });
+    const bench_exe_install = b.addInstallArtifact(bench_exe, .{});
+    const bench_build_step = b.step("bench-exe", "Build benchmarking utility");
+    bench_build_step.dependOn(&bench_exe_install.step);
+
+    const bench_exe_run = b.addRunArtifact(bench_exe);
+    const bench_run_step = b.step("bench", "Run benchmarking utility");
+    bench_run_step.dependOn(&bench_exe_run.step);
 }
