@@ -309,10 +309,6 @@ fn getFilledBufferSlow(r: *std.Io.Reader) error{ReadFailed}![]const u8 {
 /// The writer deviates from the standard in the following ways:
 /// 1. Field (TEXTDATA) may contain any bytes, as long as they are not COMMA, DQUOTE or CRLF.
 /// 2. The values for COMMA, DQUOTE or CRLF rules can be customized; see `Dialect` for details.
-///
-/// `IoWriter` can be any type with `fn writeAll(self, []const u8) !void` and
-/// `fn writeByte(self, u8) !void` methods. However, it is highly recommended to use
-/// io.BufferedWriter.
 pub const Writer = struct {
     w: *std.Io.Writer,
     d: Dialect,
@@ -350,7 +346,8 @@ pub const Writer = struct {
     /// writeRecord writes a CSV record to the underlying writer.
     ///
     /// `record` can be either a slice, pointer-to-many or a tuple of []const u8
-    /// (or anything which can automatically be coerced to []const u8).
+    /// (or anything which can automatically be coerced to []const u8);
+    /// or simply a Record instance.
     ///
     /// It's forbidden to mix `writeRecord` and `writeField` calls to write a single record.
     /// If mixing both functions, a `writeRecord` can't follow a call to `writeField` -
@@ -378,6 +375,12 @@ pub const Writer = struct {
             },
 
             else => {},
+        }
+
+        if (@TypeOf(record) == Record) {
+            for (0..record.len()) |i| try self.writeField(record.get(i));
+            try self.terminateRecord();
+            return;
         }
 
         @compileError(@typeName(@TypeOf(record)) ++ " can't be interpreted as a CSV record");
@@ -425,8 +428,8 @@ pub const Writer = struct {
 
 /// Record represents a single record from a CSV file.
 ///
-/// Record internally consists of an `ArrayList(ArrayList(u8))`. Not all elements hold
-/// valid fields. Elements which do, are called "complete".
+/// Even if get and getSafe functions return null-terminated strings, they make
+/// no guarantee that no null bytes exist inside of the fields.
 ///
 /// There recommended way to iterate over fields of a Record is:
 ///
@@ -445,84 +448,73 @@ pub const Record = struct {
     /// in the provided reader, **not** the number of terminators.
     line_no: u32 = 0,
 
-    /// Array of buffers for fields. Length has to be >= self.complete_fields.
-    /// Extra elements preserve allocated buffers for next fields, to avoid reallocations.
-    field_buffers: std.ArrayList(std.ArrayList(u8)) = .{},
+    /// Continuous buffer for all the fields concatenated together, separated by a null byte.
+    buffer: std.ArrayList(u8) = .{},
 
-    /// Number of complete fields in `field_buffers`.
-    /// `field_buffers[0..complete_fields]` represents completely parsed fields.
-    complete_fields: usize = 0,
+    /// Indices of the null bytes terminating the nth field.
+    ends: std.ArrayList(usize) = .{},
 
     pub inline fn init(allocator: std.mem.Allocator) Record {
         return .{ .allocator = allocator };
     }
 
     pub fn deinit(self: *Record) void {
-        for (self.field_buffers.items) |*field_buffer| {
-            field_buffer.deinit(self.allocator);
-        }
-        self.field_buffers.deinit(self.allocator);
+        self.buffer.deinit(self.allocator);
+        self.ends.deinit(self.allocator);
     }
 
     /// line returns the number of complete fields in this record
     pub inline fn len(self: Record) usize {
-        std.debug.assert(self.field_buffers.items.len >= self.complete_fields); // invariant for complete fields
-        return self.complete_fields;
+        return self.ends.items.len;
     }
 
-    /// get returns the ith complete field, asserting that it's a complete field.
-    pub inline fn get(self: Record, i: usize) []u8 {
-        std.debug.assert(i < self.complete_fields); // check if complete field is accessed
-        std.debug.assert(self.field_buffers.items.len >= self.complete_fields); // invariant for complete fields
-        return self.field_buffers.items[i].items;
+    /// get returns the ith complete field
+    pub fn get(self: Record, i: usize) [:0]u8 {
+        const end = self.ends.items[i];
+        const start = if (i > 0) self.ends.items[i - 1] + 1 else 0;
+        return self.buffer.items[start..end :0];
     }
 
     /// get returns the ith complete field, or null if no valid field exists at the provided index.
-    pub inline fn getSafe(self: Record, i: usize) ?[]u8 {
-        std.debug.assert(self.field_buffers.items.len >= self.complete_fields); // invariant for complete fields
-        return if (i < self.complete_fields) self.field_buffers.items[i].items else null;
+    pub fn getSafe(self: Record, i: usize) ?[:0]u8 {
+        if (i >= self.ends.items.len) return null;
+        return self.get(i);
     }
 
     /// slice returns a slice over arrays holding the complete fields.
-    pub inline fn slice(self: Record) []std.ArrayList(u8) {
-        return self.field_buffers.items[0..self.complete_fields];
-    }
-
-    /// clear clears the record, setting each field_buffer to zero length (without deallocation),
-    /// and setting the number of complete fields to zero.
-    pub fn clear(self: *Record) void {
-        self.complete_fields = 0;
-        for (self.field_buffers.items) |*field_buffer| {
-            field_buffer.clearRetainingCapacity();
+    ///
+    /// The slice must be than deallocated with `allocator.free`
+    pub fn slice(self: Record, allocator: std.mem.Allocator) ![][:0]u8 {
+        var s = try allocator.alloc([:0]u8, self.ends.items.len);
+        var start = 0;
+        for (self.ends.items, 0..) |end, i| {
+            s[i] = self.buffer.items[start..end :0];
+            start = end + 1;
         }
+        return s;
     }
 
-    /// pushField marks field-being-built as complete. If no field is being built, a ""
-    /// is added as a complete field.
+    /// clear clears the record, retaining capacity in the existing slices.
+    pub fn clear(self: *Record) void {
+        self.buffer.clearRetainingCapacity();
+        self.ends.clearRetainingCapacity();
+    }
+
+    /// pushField completes the field, built by previous calls to pushByte and pushBytes.
     fn pushField(self: *Record) !void {
-        try self.ensureIncompleteField();
-        self.complete_fields += 1;
+        const end_idx = self.buffer.items.len;
+        try self.buffer.append(self.allocator, 0);
+        try self.ends.append(self.allocator, end_idx);
     }
 
     /// Adds a byte to the field-being-built, allocating that field if necessary.
     fn pushByte(self: *Record, b: u8) !void {
-        try self.ensureIncompleteField();
-        try self.field_buffers.items[self.complete_fields].append(self.allocator, b);
+        try self.buffer.append(self.allocator, b);
     }
 
     /// Adds a byte to the field-being-built, allocating that field if necessary.
     fn pushBytes(self: *Record, b: []const u8) !void {
-        try self.ensureIncompleteField();
-        try self.field_buffers.items[self.complete_fields].appendSlice(self.allocator, b);
-    }
-
-    /// Ensures the field-being-build (field_buffers[complete_fields]) exists.
-    fn ensureIncompleteField(self: *Record) !void {
-        std.debug.assert(self.field_buffers.items.len >= self.complete_fields); // invariant for complete fields
-
-        if (self.field_buffers.items.len == self.complete_fields) {
-            try self.field_buffers.append(self.allocator, .{});
-        }
+        try self.buffer.appendSlice(self.allocator, b);
     }
 };
 
