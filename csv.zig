@@ -58,10 +58,7 @@ const State = enum {
     in_field,
     in_quoted_field,
     quote_in_quoted,
-    eat_lf,
-    eat_bom_1,
-    eat_bom_2,
-    eat_bom_3,
+    eat_bom,
 };
 
 /// Parser parses [RFC 4180](https://www.rfc-editor.org/rfc/rfc4180#section-2) CSV files.
@@ -81,15 +78,17 @@ pub const Reader = struct {
     r: *std.Io.Reader,
     d: Dialect,
 
-    state: State,
     line_no: u32 = 1,
-    line_no_seen_cr: bool = false,
+    eat_bom: bool = false,
 
+    /// Creates a new Parser over the provided Reader. The Reader must be buffered,
+    /// with a buffer length of at least 3 for all features to work.
     pub inline fn init(io_reader: *std.Io.Reader, dialect: Dialect) Reader {
+        std.debug.assert(io_reader.buffer.len > 0); // csv.Reader requires a buffered std.Io.Reader
         return .{
             .r = io_reader,
             .d = dialect,
-            .state = if (dialect.bom == false) .before_record else .eat_bom_1,
+            .eat_bom = dialect.bom != false,
         };
     }
 
@@ -97,140 +96,210 @@ pub const Reader = struct {
         record.line_no = self.line_no;
         record.clear();
 
-        while (true) {
-            const b = self.getByte() catch |err| {
-                if (err == error.EndOfStream) {
-                    switch (self.state) {
-                        .before_record, .eat_lf => {
-                            return false;
-                        },
-
-                        else => {
-                            self.state = .before_record;
-                            try record.pushField();
-                            return true;
-                        },
-                    }
+        // Parse data until a record is fully parsed
+        const state: State = if (self.eat_bom) .eat_bom else .before_record;
+        sw: switch (state) {
+            .before_record => {
+                // Finish parsing altogether, or jump to .in_field or .in_quoted_field
+                const b = try self.peekByte();
+                if (b == null) {
+                    return false; // no more data
+                } else if (b == self.d.quote) {
+                    self.toss(1);
+                    continue :sw .in_quoted_field;
                 } else {
-                    return err;
+                    continue :sw .in_field;
                 }
-            };
+            },
 
-            if (self.state == .eat_bom_1) {
-                if (b == 0xEF) {
-                    self.state = .eat_bom_2;
-                    continue;
-                } else {
-                    self.state = .before_record;
-                    // fallthrough
-                }
-            }
-
-            if (self.state == .eat_bom_2) {
-                if (b == 0xBB) {
-                    self.state = .eat_bom_3;
-                } else {
-                    try record.pushByte(0xEF);
-                    self.state = .in_field;
-                }
-                continue;
-            }
-
-            if (self.state == .eat_bom_3) {
-                if (b == 0xBF) {
-                    self.state = .before_record;
-                } else {
-                    try record.pushBytes("\xEF\xBB");
-                    self.state = .in_field;
-                }
-                continue;
-            }
-
-            if (self.state == .eat_lf) {
-                if (b == '\n') {
-                    continue;
-                } else {
-                    self.state = .before_record;
-                    // fallthrough
-                }
-            }
-
-            if (self.state == .before_field or self.state == .before_record) {
+            .before_field => {
+                // Jump to .in_field or .in_quoted_field
+                const b = try self.peekByte();
                 if (b == self.d.quote) {
-                    self.state = .in_quoted_field;
-                    continue;
+                    self.toss(1);
+                    continue :sw .in_quoted_field;
                 } else {
-                    self.state = .in_field;
-                    // fallthrough
+                    continue :sw .in_field;
                 }
-            }
+            },
 
-            if (self.state == .quote_in_quoted) {
-                if (b == self.d.quote) {
-                    try record.pushByte(b);
-                    self.state = .in_quoted_field;
-                    continue;
-                } else {
-                    self.state = .in_field;
-                    // fallthrough
-                }
-            }
+            .in_field => {
+                // Advance record until delimiter or terminator
+                const stop_octets: []const u8 = switch (self.d.terminator) {
+                    .octet => |terminator| &.{ self.d.delimiter, terminator },
+                    .crlf => &.{ self.d.delimiter, '\r', '\n' },
+                };
 
-            if (self.state == .in_field) {
-                // Try to match with delimiter
-                if (b == self.d.delimiter) {
+                const r = try self.peekUntil(stop_octets);
+                const data = r[0];
+                const delim = r[1];
+
+                // Stop parsing on EOF - report field as ready
+                if (data.len == 0 and delim == null) {
                     try record.pushField();
-                    self.state = .before_field;
-                    continue;
+                    return true;
                 }
 
-                // Try to match with terminator
+                // Push field data
+                if (data.len > 0) {
+                    try record.pushBytes(data);
+                }
+
+                // Skip read data
+                self.toss(data.len + @intFromBool(delim != null));
+
+                // Match with field delimiter
+                if (delim == self.d.delimiter) {
+                    try record.pushField();
+                    continue :sw .before_field;
+                }
+
+                // Match with record terminator
                 switch (self.d.terminator) {
                     .octet => |terminator| {
-                        if (b == terminator) {
-                            self.state = .before_record;
+                        if (delim == terminator) {
                             try record.pushField();
                             return true;
                         }
                     },
 
                     .crlf => {
-                        if (b == '\r' or b == '\n') {
-                            self.state = if (b == '\r') .eat_lf else .before_record;
+                        if (delim == '\r') {
+                            try record.pushField();
+                            try self.tossLf();
+                            return true;
+                        } else if (delim == '\n') {
                             try record.pushField();
                             return true;
                         }
                     },
                 }
 
-                try record.pushByte(b);
-                continue;
-            }
+                continue :sw .in_field;
+            },
 
-            if (self.state == .in_quoted_field) {
-                if (b == self.d.quote) {
-                    self.state = .quote_in_quoted;
-                } else {
-                    try record.pushByte(b);
+            .in_quoted_field => {
+                // Advance record until quote
+                const r = try self.peekUntil(&.{self.d.quote.?});
+                const data = r[0];
+                const has_quote = r[1] != null;
+
+                // Stop parsing on EOF - report field as ready
+                if (data.len == 0 and !has_quote) {
+                    try record.pushField();
+                    return true;
                 }
-                continue;
-            }
+
+                // Push field data
+                if (data.len > 0) {
+                    try record.pushBytes(data);
+                }
+
+                // Skip read data
+                self.toss(data.len + @intFromBool(has_quote));
+
+                // Jump to .quote_in_quoted if seen a quote
+                if (has_quote) continue :sw .quote_in_quoted;
+                continue :sw .in_quoted_field;
+            },
+
+            .quote_in_quoted => {
+                const b = try self.peekByte();
+                if (b == null) {
+                    // Stop parsing on EOF - report field as ready
+                    return true;
+                } else if (b == self.d.quote) {
+                    // Escaped quote
+                    try record.pushByte(b.?);
+                    self.toss(1);
+                    continue :sw .in_quoted_field;
+                }
+                // Jump to .in_field - end of quoted portion of the field
+                continue :sw .in_field;
+            },
+
+            .eat_bom => {
+                self.eat_bom = false;
+                const b = try self.peek();
+                if (std.mem.startsWith(u8, b, "\xEF\xBB\xBF")) {
+                    self.r.toss(3); // BOM contains no newlines, we can bypass Reader.toss
+                }
+                continue :sw .before_record;
+            },
+        }
+
+        unreachable;
+    }
+
+    /// Tosses `len` buffered bytes, advancing `self.line_no` by the number of tossed newlines.
+    fn toss(self: *Reader, len: usize) void {
+        const b = self.r.buffered()[0..len];
+        self.line_no += @intCast(std.mem.count(u8, b, &.{'\n'}));
+        self.r.toss(len);
+    }
+
+    /// Tosses the next byte if it's the newline, advancing `self.line_no` if that is the case.
+    fn tossLf(self: *Reader) !void {
+        if (try self.peekByte() == '\n') {
+            self.r.toss(1);
+            self.line_no += 1;
         }
     }
 
-    fn getByte(self: *Reader) !u8 {
-        const b = try self.r.takeByte();
-        if (b == '\r') {
-            self.line_no += 1;
-            self.line_no_seen_cr = true;
-        } else if (b == '\n' and !self.line_no_seen_cr) {
-            self.line_no += 1;
-        } else {
-            self.line_no_seen_cr = false;
+    /// Gets as much buffered data as possible, issuing only a single read if none is available.
+    /// Returns `""` on EOF.
+    fn peek(self: *Reader) error{ReadFailed}![]const u8 {
+        return getFilledBuffer(self.r);
+    }
+
+    /// Gets the next buffered byte. Returns `null` on EOF.
+    fn peekByte(self: *Reader) error{ReadFailed}!?u8 {
+        return self.r.peekByte() catch |err| switch (err) {
+            error.EndOfStream => return null,
+            inline else => |e| return e,
+        };
+    }
+
+    /// Gets buffered data (from `peek()`) until the first instance of one of the provided delimiters.
+    ///
+    /// Returns:
+    /// - `.{ "", null }` on EOF,
+    /// - `.{ data, delimiter }` if any delimiter was found (note that data may be empty),
+    /// - `.{ data, null }` otherwise.
+    fn peekUntil(self: *Reader, delimiters: []const u8) error{ReadFailed}!struct { []const u8, ?u8 } {
+        const b = try self.peek();
+        if (std.mem.indexOfAny(u8, b, delimiters)) |delim_idx| {
+            return .{ b[0..delim_idx], b[delim_idx] };
         }
-        return b;
+        return .{ b, null };
     }
 };
+
+fn getFilledBuffer(r: *std.Io.Reader) error{ReadFailed}![]const u8 {
+    if (r.bufferedLen() > 0) {
+        @branchHint(.likely);
+        return r.buffered();
+    }
+    return getFilledBufferSlow(r);
+}
+
+fn getFilledBufferSlow(r: *std.Io.Reader) error{ReadFailed}![]const u8 {
+    // Rebase to nothing buffered
+    r.seek = 0;
+    r.end = 0;
+
+    // Request a read
+    var bufs: [1][]u8 = .{""};
+    _ = r.vtable.readVec(r, &bufs) catch |err| switch (err) {
+        error.EndOfStream => return "",
+        inline else => |e| return e,
+    };
+
+    // Ensure something was read
+    const new_data = r.buffered();
+    std.debug.assert(new_data.len > 0); // Reading from std.Io.Reader succeeded, but no data was read
+    return new_data;
+}
 
 /// Writers writes [RFC 4180](https://www.rfc-editor.org/rfc/rfc4180#section-2) CSV files.
 ///
