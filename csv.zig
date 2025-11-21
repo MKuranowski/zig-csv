@@ -92,6 +92,9 @@ pub const Reader = struct {
         };
     }
 
+    /// Parses a single row from the underlying file. Returns true if the row was successfully
+    /// parsed and false on EOF. This function is designed to be called in a
+    /// `while (try r.next(...))` loop.
     pub fn next(self: *Reader, record: *Record) !bool {
         record.line_no = self.line_no;
         record.clear();
