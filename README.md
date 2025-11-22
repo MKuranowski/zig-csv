@@ -29,10 +29,6 @@ These instructions assume a standard build.zig-based project.
 Usage
 -----
 
-Note that due to <https://github.com/ziglang/zig/issues/12484> the below examples
-use the [c_allocator](https://ziglang.org/documentation/0.13.0/std/#std.heap.c_allocator)
-and therefore require linking against libc.
-
 ### Basic reading
 
 ```zig
@@ -40,20 +36,24 @@ const std = @import("std");
 const csv = @import("csv");
 
 pub fn main() !void {
+    // Initialize stdout for printing stats
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
+    // Open a file for reading
     var file_buffer: [4096]u8 = undefined;
     const file_handle = try std.fs.cwd().openFileZ("file.csv", .{});
     defer file_handle.close();
     var file_reader = file_handle.reader(&file_buffer);
     const file = &file_reader.interface;
 
+    // Prepare the csv.Reader and csv.Record objects
     var reader = csv.Reader.init(file, .{});
-    var record = csv.Record.init(std.heap.c_allocator);
+    var record = csv.Record.init(std.heap.smp_allocator);
     defer record.deinit();
 
+    // Read records from the CSV file and print its fields
     while (try reader.next(&record)) {
         try stdout.print("Record at line {d} with {d} fields:\n", .{ record.line_no, record.len() });
         for (0..record.len()) |i| {
@@ -63,6 +63,7 @@ pub fn main() !void {
 
     try stdout.flush();
 }
+
 ```
 
 ### Basic writing
@@ -72,12 +73,14 @@ const std = @import("std");
 const csv = @import("csv");
 
 pub fn main() !void {
+    // Open a file for writing
     var file_buffer: [4096]u8 = undefined;
     const file_handle = try std.fs.cwd().createFileZ("file.csv", .{});
     defer file_handle.close();
     var file_writer = file_handle.writer(&file_buffer);
     const file = &file_writer.interface;
 
+    // Prepare the csv.Writer object
     var writer = csv.Writer.init(file, .{});
 
     // Write a record from a tuple
@@ -92,8 +95,10 @@ pub fn main() !void {
     try writer.writeField("2.7183");
     try writer.terminateRecord();
 
+    // Don't forget to flush buffered data to the actual file
     try file.flush();
 }
+
 ```
 
 ### Advanced
