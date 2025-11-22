@@ -11,7 +11,7 @@ Installation
 
 These instructions assume a standard build.zig-based project.
 
-1. Fetch the library: `zig fetch --save https://github.com/MKuranowski/zig-csv/archive/refs/tags/v2.0.0.tar.gz`
+1. Fetch the library: `zig fetch --save https://github.com/MKuranowski/zig-csv/archive/refs/tags/v2.1.0.tar.gz`
 2. Add a dependency to `build.zig`:
     ```zig
     const csv_module = b.dependency("csv", .{ .target = target, .optimize = optimize }).module("csv");
