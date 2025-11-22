@@ -392,6 +392,7 @@ pub const Writer = struct {
     /// of the record have been written.
     pub fn writeField(self: *Writer, field: []const u8) !void {
         if (self.needs_bom) {
+            @branchHint(.unlikely);
             try self.w.writeAll("\xEF\xBB\xBF");
             self.needs_bom = false;
         }
@@ -401,11 +402,15 @@ pub const Writer = struct {
 
         if (self.needsEscaping(field)) {
             const quote = self.d.quote orelse '"';
+
+            var offset: usize = 0;
             try self.w.writeByte(quote);
-            for (field) |octet| {
-                if (octet == quote) try self.w.writeByte(octet);
-                try self.w.writeByte(octet);
+            while (std.mem.indexOfScalarPos(u8, field, offset, quote)) |i| {
+                try self.w.writeAll(field[offset..i]);
+                try self.w.writeAll(&.{ quote, quote });
+                offset = i + 1;
             }
+            try self.w.writeAll(field[offset..]);
             try self.w.writeByte(quote);
         } else {
             try self.w.writeAll(field);
@@ -673,7 +678,7 @@ test "csv.writing.bom" {
     );
 }
 
-test "csv.writing_with_custom_dialect" {
+test "csv.writing.with_custom_dialect" {
     var buffer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer buffer.deinit();
 
@@ -690,6 +695,19 @@ test "csv.writing_with_custom_dialect" {
 
     try std.testing.expectEqualStrings(
         "foo|bar|baz#'needs|escaping'|'and''this#too'|\"but this\" - no#",
+        buffer.written(),
+    );
+}
+
+test "csv.writing.escaped_fields" {
+    var buffer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer buffer.deinit();
+
+    var w = Writer.init(&buffer.writer, .{});
+    try w.writeRecord(.{ "Foo \"Bar\" Baz", "\n,", "Two \"\" in row", "At end\"" });
+
+    try std.testing.expectEqualStrings(
+        "\"Foo \"\"Bar\"\" Baz\",\"\n,\",\"Two \"\"\"\" in row\",\"At end\"\"\"\r\n",
         buffer.written(),
     );
 }
